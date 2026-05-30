@@ -55,6 +55,9 @@ jobs:
 
       - name: Build
         run: gradle ${{ inputs.gradle-task }} --no-daemon
+        env:
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
 
       - name: Upload Artifact
         if: inputs.upload-artifact

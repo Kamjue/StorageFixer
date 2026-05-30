@@ -9,7 +9,22 @@ permissions:
   contents: write
 
 jobs:
+  validate-tag:
+    name: Validate SemVer Tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check tag format
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "Tag: $TAG"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid tag '$TAG'. Tags must follow SemVer format: vMAJOR.MINOR.PATCH (e.g. v1.0.0)"
+            exit 1
+          fi
+          echo "Tag '$TAG' is valid SemVer."
+
   release:
+    needs: validate-tag
     uses: ./.github/workflows/android.yml
     with:
       gradle-task: "assembleRelease"
