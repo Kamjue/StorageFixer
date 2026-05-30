@@ -462,6 +462,7 @@ public class StorageFixer {
         int skipped = 0;
         int ignored = 0;
         List<String> fixedPkgs = new ArrayList<>();
+        boolean whitelistMode = IgnoredAppsManager.isWhitelistMode(ctx);
         Set<String> ignoredApps = IgnoredAppsManager.getIgnoredApps(ctx);
 
         for (ApplicationInfo app : apps) {
@@ -469,7 +470,9 @@ public class StorageFixer {
             String pkg = app.packageName;
             if (pkg.equals(ctx.getPackageName())) continue;
 
-            if (ignoredApps.contains(pkg)) {
+            boolean isSelected = ignoredApps.contains(pkg);
+            boolean isIgnored = whitelistMode ? !isSelected : isSelected;
+            if (isIgnored) {
                 ignored++;
                 continue;
             }
