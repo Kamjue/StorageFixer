@@ -25,6 +25,8 @@ jobs:
 
   release:
     needs: validate-tag
+    permissions:
+      contents: write
     uses: ./.github/workflows/android.yml
     with:
       gradle-task: "assembleRelease"
