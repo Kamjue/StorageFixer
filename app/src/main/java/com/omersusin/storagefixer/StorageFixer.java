@@ -3,9 +3,7 @@ package com.omersusin.storagefixer;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
-
 import com.topjohnwu.superuser.Shell;
-
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -14,14 +12,16 @@ public class StorageFixer {
 
     private static final String LOWER = "/data/media/0/Android";
     private static final String FUSE = "/storage/emulated/0/Android";
-    private static final String[] DIR_TYPES = {"data", "obb", "media"};
+    private static final String[] DIR_TYPES = { "data", "obb", "media" };
 
     public static boolean isRootAvailable() {
         return Shell.getShell().isRoot();
     }
 
     public static boolean isFuseReady() {
-        return Shell.cmd("ls " + FUSE + "/data/").exec().isSuccess();
+        return Shell.cmd("ls " + FUSE + "/data/")
+            .exec()
+            .isSuccess();
     }
 
     public static boolean waitForFuse(int maxSeconds) {
@@ -30,7 +30,9 @@ public class StorageFixer {
                 FixerLog.i("FUSE ready after " + i + "s");
                 return true;
             }
-            try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
+            try {
+                Thread.sleep(1000);
+            } catch (InterruptedException ignored) {}
         }
         FixerLog.e("FUSE not ready after " + maxSeconds + "s");
         return false;
@@ -40,8 +42,12 @@ public class StorageFixer {
 
     private static int getAppUid(Context ctx, String pkg) {
         try {
-            ApplicationInfo info = ctx.getPackageManager()
-                    .getApplicationInfo(pkg, PackageManager.ApplicationInfoFlags.of(0));
+            ApplicationInfo info = ctx
+                .getPackageManager()
+                .getApplicationInfo(
+                    pkg,
+                    PackageManager.ApplicationInfoFlags.of(0)
+                );
             return info.uid;
         } catch (PackageManager.NameNotFoundException e) {
             FixerLog.e("Package not found: " + pkg);
@@ -49,15 +55,99 @@ public class StorageFixer {
         }
     }
 
+    private static boolean requestsPermission(
+        Context ctx,
+        String pkg,
+        String permission
+    ) {
+        try {
+            android.content.pm.PackageInfo info = ctx
+                .getPackageManager()
+                .getPackageInfo(pkg, PackageManager.GET_PERMISSIONS);
+            if (info.requestedPermissions != null) {
+                for (String p : info.requestedPermissions) {
+                    if (p.equals(permission)) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    @SuppressWarnings("BlockedPrivateApi")
+    private static boolean isLegacyStorageApp(Context ctx, String pkg) {
+        try {
+            ApplicationInfo info = ctx
+                .getPackageManager()
+                .getApplicationInfo(
+                    pkg,
+                    PackageManager.ApplicationInfoFlags.of(0)
+                );
+
+            // Legacy by targetSdk
+            if (info.targetSdkVersion < 30) {
+                return true;
+            }
+
+            // Legacy flag detection
+            try {
+                java.lang.reflect.Field field =
+                    ApplicationInfo.class.getDeclaredField("privateFlags");
+
+                field.setAccessible(true);
+
+                int privateFlags = (Integer) field.get(info);
+
+                // hardcoded constant; avoid forbidden reflection
+                final int LEGACY_FLAG = 1 << 29;
+
+                return (privateFlags & LEGACY_FLAG) != 0;
+            } catch (Exception ignored) {}
+        } catch (Exception ignored) {}
+
+        return false;
+    }
+
+    private static String getCustomDirName(String pkg) {
+        if (pkg.equals("idm.internet.download.manager.plus")) {
+            return "idmp";
+        }
+        String suffix = pkg.substring(pkg.lastIndexOf('.') + 1);
+        if (
+            suffix.equalsIgnoreCase("android") ||
+            suffix.equalsIgnoreCase("plus") ||
+            suffix.length() < 3
+        ) {
+            return pkg.replace(".", "_");
+        }
+        return suffix;
+    }
+
     // ========== CHECK IF NEEDS FIX ==========
 
-    public static boolean needsFix(String pkg) {
+    public static boolean needsFix(Context ctx, String pkg) {
+        if (isLegacyStorageApp(ctx, pkg)) {
+            String customDir = getCustomDirName(pkg);
+            String customPath = "/data/media/0/" + customDir;
+            Shell.Result exists = Shell.cmd(
+                "[ -d '" + customPath + "' ] && echo Y || echo N"
+            ).exec();
+            if (
+                exists.getOut().isEmpty() || "N".equals(exists.getOut().get(0))
+            ) {
+                return true;
+            }
+        }
+
         for (String type : DIR_TYPES) {
             String lowerPath = LOWER + "/" + type + "/" + pkg;
             Shell.Result exists = Shell.cmd(
                 "[ -d '" + lowerPath + "' ] && echo Y || echo N"
             ).exec();
-            if (exists.getOut().isEmpty() || "N".equals(exists.getOut().get(0))) {
+            if (
+                exists.getOut().isEmpty() || "N".equals(exists.getOut().get(0))
+            ) {
                 return true;
             }
 
@@ -65,7 +155,10 @@ public class StorageFixer {
             Shell.Result fuseExists = Shell.cmd(
                 "[ -d '" + fusePath + "' ] && echo Y || echo N"
             ).exec();
-            if (fuseExists.getOut().isEmpty() || "N".equals(fuseExists.getOut().get(0))) {
+            if (
+                fuseExists.getOut().isEmpty() ||
+                "N".equals(fuseExists.getOut().get(0))
+            ) {
                 return true;
             }
         }
@@ -74,23 +167,39 @@ public class StorageFixer {
 
     // ========== CHECK IF NEEDS APPOPS FIX ==========
 
-    private static boolean needsAppopsFix(String pkg) {
+    private static boolean needsAppopsFix(Context ctx, String pkg) {
+        if (isLegacyStorageApp(ctx, pkg)) {
+            Shell.Result res = Shell.cmd(
+                "appops get --uid " + pkg + " LEGACY_STORAGE 2>/dev/null"
+            ).exec();
+            if (!res.getOut().isEmpty()) {
+                String out = res.getOut().get(0);
+                if (!out.contains("allow")) {
+                    return true;
+                }
+            } else {
+                return true;
+            }
+
+            Shell.Result res2 = Shell.cmd(
+                "appops get --uid " + pkg + " NO_ISOLATED_STORAGE 2>/dev/null"
+            ).exec();
+            if (!res2.getOut().isEmpty()) {
+                String out = res2.getOut().get(0);
+                if (!out.contains("allow")) {
+                    return true;
+                }
+            } else {
+                return true;
+            }
+        }
+
         Shell.Result res = Shell.cmd(
             "appops get " + pkg + " LEGACY_STORAGE 2>/dev/null"
         ).exec();
         if (!res.getOut().isEmpty()) {
             String out = res.getOut().get(0);
-            if (out.contains("deny") || out.contains("ignore") || out.contains("default")) {
-                return true;
-            }
-        }
-
-        Shell.Result res2 = Shell.cmd(
-            "appops get " + pkg + " MANAGE_EXTERNAL_STORAGE 2>/dev/null"
-        ).exec();
-        if (!res2.getOut().isEmpty()) {
-            String out = res2.getOut().get(0);
-            if (out.contains("deny") || out.contains("ignore") || out.contains("default")) {
+            if (out.contains("deny") || out.contains("ignore")) {
                 return true;
             }
         }
@@ -104,10 +213,14 @@ public class StorageFixer {
         FixerLog.i("Fixing appops for " + pkg);
 
         Shell.cmd("appops set --uid " + pkg + " LEGACY_STORAGE allow").exec();
-        Shell.cmd("appops set --uid " + pkg + " NO_ISOLATED_STORAGE allow").exec();
+        Shell.cmd(
+            "appops set --uid " + pkg + " NO_ISOLATED_STORAGE allow"
+        ).exec();
         Shell.cmd("appops set " + pkg + " READ_EXTERNAL_STORAGE allow").exec();
         Shell.cmd("appops set " + pkg + " WRITE_EXTERNAL_STORAGE allow").exec();
-        Shell.cmd("appops set " + pkg + " MANAGE_EXTERNAL_STORAGE allow").exec();
+        Shell.cmd(
+            "appops set " + pkg + " MANAGE_EXTERNAL_STORAGE allow"
+        ).exec();
 
         FixerLog.i("Appops fixed for " + pkg);
     }
@@ -118,7 +231,11 @@ public class StorageFixer {
         return fixPackage(ctx, pkg, false);
     }
 
-    public static FixResult fixPackage(Context ctx, String pkg, boolean diagnose) {
+    public static FixResult fixPackage(
+        Context ctx,
+        String pkg,
+        boolean diagnose
+    ) {
         FixResult r = new FixResult(pkg);
 
         int uid = getAppUid(ctx, pkg);
@@ -144,6 +261,59 @@ public class StorageFixer {
         // Fix appops (FileProvider + storage access)
         fixAppops(pkg);
 
+        // Targeted fix for Legacy Storage Apps (including IDM+)
+        if (isLegacyStorageApp(ctx, pkg)) {
+            FixerLog.i("Applying legacy storage fix for " + pkg + "...");
+
+            // Set AppOps at the UID level explicitly (so it doesn't get wiped/ignored)
+            Shell.cmd(
+                "appops set --uid " + pkg + " LEGACY_STORAGE allow"
+            ).exec();
+            Shell.cmd(
+                "appops set --uid " + pkg + " NO_ISOLATED_STORAGE allow"
+            ).exec();
+            Shell.cmd("appops set " + pkg + " LEGACY_STORAGE allow").exec();
+            Shell.cmd(
+                "appops set " + pkg + " NO_ISOLATED_STORAGE allow"
+            ).exec();
+
+            // Grant runtime storage permissions via PM
+            Shell.cmd(
+                "pm grant " +
+                    pkg +
+                    " android.permission.READ_EXTERNAL_STORAGE 2>/dev/null"
+            ).exec();
+            Shell.cmd(
+                "pm grant " +
+                    pkg +
+                    " android.permission.WRITE_EXTERNAL_STORAGE 2>/dev/null"
+            ).exec();
+
+            // Create and permission the custom legacy directory (lower FS path)
+            String customDir = getCustomDirName(pkg);
+            String customPath = "/data/media/0/" + customDir;
+            Shell.cmd("mkdir -p " + customPath).exec();
+            Shell.cmd("chown " + owner + " " + customPath).exec();
+            Shell.cmd("chmod 777 " + customPath).exec();
+            Shell.cmd(
+                "chcon u:object_r:media_rw_data_file:s0 " +
+                    customPath +
+                    " 2>/dev/null"
+            ).exec();
+
+            // Ensure /sdcard/Download/ is fully writeable (lower FS path is /data/media/0/Download)
+            String downloadPath = "/data/media/0/Download";
+            Shell.cmd("mkdir -p " + downloadPath).exec();
+            Shell.cmd("chmod 777 " + downloadPath).exec();
+            Shell.cmd(
+                "chcon u:object_r:media_rw_data_file:s0 " +
+                    downloadPath +
+                    " 2>/dev/null"
+            ).exec();
+
+            FixerLog.i("Legacy storage fix complete for " + pkg);
+        }
+
         if (diagnose) {
             FixerLog.i("=== FUSE VERIFICATION ===");
             for (String type : DIR_TYPES) {
@@ -154,19 +324,35 @@ public class StorageFixer {
             for (String type : DIR_TYPES) {
                 boolean lower = testWrite(LOWER + "/" + type + "/" + pkg);
                 boolean fuse = testWrite(FUSE + "/" + type + "/" + pkg);
-                FixerLog.i("  " + type + ": lower=" + (lower ? "PASS" : "FAIL")
-                        + " fuse=" + (fuse ? "PASS" : "FAIL"));
+                FixerLog.i(
+                    "  " +
+                        type +
+                        ": lower=" +
+                        (lower ? "PASS" : "FAIL") +
+                        " fuse=" +
+                        (fuse ? "PASS" : "FAIL")
+                );
             }
             r.writeTestOk = testWrite(FUSE + "/data/" + pkg);
 
             // Log appops state
             FixerLog.i("=== APPOPS STATE ===");
             Shell.Result appops = Shell.cmd(
-                "appops get " + pkg + " LEGACY_STORAGE;"
-                + " appops get " + pkg + " NO_ISOLATED_STORAGE;"
-                + " appops get " + pkg + " MANAGE_EXTERNAL_STORAGE;"
-                + " appops get " + pkg + " READ_EXTERNAL_STORAGE;"
-                + " appops get " + pkg + " WRITE_EXTERNAL_STORAGE"
+                "appops get " +
+                    pkg +
+                    " LEGACY_STORAGE;" +
+                    " appops get " +
+                    pkg +
+                    " NO_ISOLATED_STORAGE;" +
+                    " appops get " +
+                    pkg +
+                    " MANAGE_EXTERNAL_STORAGE;" +
+                    " appops get " +
+                    pkg +
+                    " READ_EXTERNAL_STORAGE;" +
+                    " appops get " +
+                    pkg +
+                    " WRITE_EXTERNAL_STORAGE"
             ).exec();
             for (String line : appops.getOut()) {
                 FixerLog.i("  " + line.trim());
@@ -175,11 +361,20 @@ public class StorageFixer {
 
         r.success = r.dataOk && r.obbOk;
 
-        FixerLog.i((r.success ? "OK" : "FAIL") + " " + pkg
-                + " [data:" + (r.dataOk ? "ok" : "fail")
-                + " obb:" + (r.obbOk ? "ok" : "fail")
-                + " media:" + (r.mediaOk ? "ok" : "fail")
-                + " uid:" + uid + "]");
+        FixerLog.i(
+            (r.success ? "OK" : "FAIL") +
+                " " +
+                pkg +
+                " [data:" +
+                (r.dataOk ? "ok" : "fail") +
+                " obb:" +
+                (r.obbOk ? "ok" : "fail") +
+                " media:" +
+                (r.mediaOk ? "ok" : "fail") +
+                " uid:" +
+                uid +
+                "]"
+        );
 
         if (diagnose) FixerLog.divider();
         return r;
@@ -193,34 +388,48 @@ public class StorageFixer {
 
         Shell.Result mk = Shell.cmd("mkdir -p '" + path + "'").exec();
         if (!mk.isSuccess()) {
-            if (diagnose) for (String e : mk.getErr()) FixerLog.e("  mkdir ERR: " + e);
+            if (diagnose) for (String e : mk.getErr())
+                FixerLog.e("  mkdir ERR: " + e);
             return false;
         }
 
         Shell.cmd("chown " + owner + " '" + path + "'").exec();
         Shell.cmd("chmod 777 '" + path + "'").exec();
 
+        String context = "u:object_r:media_rw_data_file:s0";
         Shell.Result chcon = Shell.cmd(
-            "chcon u:object_r:media_rw_data_file:s0 '" + path + "'"
+            "chcon " + context + " '" + path + "'"
         ).exec();
         if (!chcon.isSuccess()) {
-            String[] alts = {"u:object_r:media_data_file:s0", "u:object_r:fuse:s0"};
+            String[] alts = {
+                "u:object_r:media_data_file:s0",
+                "u:object_r:fuse:s0",
+            };
             for (String alt : alts) {
-                if (Shell.cmd("chcon " + alt + " '" + path + "'").exec().isSuccess()) {
+                if (
+                    Shell.cmd("chcon " + alt + " '" + path + "'")
+                        .exec()
+                        .isSuccess()
+                ) {
+                    context = alt;
                     if (diagnose) FixerLog.i("  chcon OK: " + alt);
                     break;
                 }
             }
         }
 
+        Shell.cmd("chcon -R " + context + " '" + path + "' 2>/dev/null").exec();
         Shell.cmd("chown -R " + owner + " '" + path + "' 2>/dev/null").exec();
+        Shell.cmd("chmod -R 777 '" + path + "' 2>/dev/null").exec();
 
         if (diagnose) logDirState("AFTER", path);
 
         Shell.Result verify = Shell.cmd(
             "[ -d '" + path + "' ] && echo OK || echo FAIL"
         ).exec();
-        return !verify.getOut().isEmpty() && "OK".equals(verify.getOut().get(0));
+        return (
+            !verify.getOut().isEmpty() && "OK".equals(verify.getOut().get(0))
+        );
     }
 
     // ========== FORCE STOP ==========
@@ -234,8 +443,8 @@ public class StorageFixer {
 
     public static void triggerMediaRescan() {
         Shell.cmd(
-            "content call --uri content://media/"
-            + " --method scan_volume --arg external_primary"
+            "content call --uri content://media/" +
+                " --method scan_volume --arg external_primary"
         ).exec();
     }
 
@@ -245,7 +454,8 @@ public class StorageFixer {
         List<FixResult> results = new ArrayList<>();
         PackageManager pm = ctx.getPackageManager();
         List<ApplicationInfo> apps = pm.getInstalledApplications(
-                PackageManager.ApplicationInfoFlags.of(0));
+            PackageManager.ApplicationInfoFlags.of(0)
+        );
 
         int fixedDirs = 0;
         int fixedAppops = 0;
@@ -267,8 +477,8 @@ public class StorageFixer {
                 continue;
             }
 
-            boolean dirsBroken = needsFix(pkg);
-            boolean appopsBroken = needsAppopsFix(pkg);
+            boolean dirsBroken = needsFix(ctx, pkg);
+            boolean appopsBroken = needsAppopsFix(ctx, pkg);
 
             if (!dirsBroken && !appopsBroken) {
                 skipped++;
@@ -298,10 +508,17 @@ public class StorageFixer {
             triggerMediaRescan();
         }
 
-        FixerLog.i("Done: " + fixedDirs + " dirs fixed, "
-                + fixedAppops + " appops fixed, "
-                + skipped + " already OK, "
-                + ignored + " ignored");
+        FixerLog.i(
+            "Done: " +
+                fixedDirs +
+                " dirs fixed, " +
+                fixedAppops +
+                " appops fixed, " +
+                skipped +
+                " already OK, " +
+                ignored +
+                " ignored"
+        );
         return results;
     }
 
@@ -324,28 +541,35 @@ public class StorageFixer {
         ).exec();
         FixerLog.i("Root: " + join(ksuRes.getOut()));
 
-        Shell.Result fsRes = Shell.cmd("mount | grep emulated | head -5").exec();
+        Shell.Result fsRes = Shell.cmd(
+            "mount | grep emulated | head -5"
+        ).exec();
         FixerLog.i("Mounts:");
-        for (String line : fsRes.getOut())
-            FixerLog.i("  " + line.trim());
+        for (String line : fsRes.getOut()) FixerLog.i("  " + line.trim());
 
         Shell.Result avcRes = Shell.cmd(
-            "dmesg 2>/dev/null | grep 'avc.*denied' | grep -iE 'vold|media|fuse|"
-            + pkg.replace(".", "\\.") + "' | tail -15"
-            + " || echo 'Cannot read dmesg'"
+            "dmesg 2>/dev/null | grep 'avc.*denied' | grep -iE 'vold|media|fuse|" +
+                pkg.replace(".", "\\.") +
+                "' | tail -15" +
+                " || echo 'Cannot read dmesg'"
         ).exec();
         FixerLog.i("AVC denials:");
-        for (String line : avcRes.getOut())
-            FixerLog.i("  " + line.trim());
+        for (String line : avcRes.getOut()) FixerLog.i("  " + line.trim());
 
         int uid = getAppUid(ctx, pkg);
         FixerLog.i("App UID: " + uid);
-        FixerLog.i("Needs dir fix: " + (needsFix(pkg) ? "YES" : "NO"));
-        FixerLog.i("Needs appops fix: " + (needsAppopsFix(pkg) ? "YES" : "NO"));
+        FixerLog.i("Needs dir fix: " + (needsFix(ctx, pkg) ? "YES" : "NO"));
+        FixerLog.i(
+            "Needs appops fix: " + (needsAppopsFix(ctx, pkg) ? "YES" : "NO")
+        );
 
-        boolean shouldIgnore = IgnoredAppsManager.shouldIgnore(ctx, pkg);
-        if (shouldIgnore) {
-            FixerLog.w("WARNING: " + pkg + " is ignored — skipping fix");
+        boolean isIgnored = IgnoredAppsManager.isIgnored(ctx, pkg);
+        if (isIgnored) {
+            FixerLog.w(
+                "WARNING: " +
+                    pkg +
+                    " is in the Ignored Apps list — skipping fix"
+            );
         }
 
         FixerLog.i("=== CURRENT STATE ===");
@@ -362,7 +586,11 @@ public class StorageFixer {
 
             forceStopPackage(pkg);
 
-            try { Thread.sleep(3000); } catch (InterruptedException e) { /* ignored */ }
+            try {
+                Thread.sleep(3000);
+            } catch (InterruptedException e) {
+                /* ignored */
+            }
 
             FixerLog.i("=== POST-FIX (3s after force-stop) ===");
             for (String type : DIR_TYPES) {
@@ -374,8 +602,14 @@ public class StorageFixer {
             for (String type : DIR_TYPES) {
                 boolean lower = testWrite(LOWER + "/" + type + "/" + pkg);
                 boolean fuse = testWrite(FUSE + "/" + type + "/" + pkg);
-                FixerLog.i("  " + type + ": lower=" + (lower ? "PASS" : "FAIL")
-                        + " fuse=" + (fuse ? "PASS" : "FAIL"));
+                FixerLog.i(
+                    "  " +
+                        type +
+                        ": lower=" +
+                        (lower ? "PASS" : "FAIL") +
+                        " fuse=" +
+                        (fuse ? "PASS" : "FAIL")
+                );
             }
         }
 
@@ -387,16 +621,27 @@ public class StorageFixer {
     private static boolean testWrite(String path) {
         String testFile = path + "/.sf_test_" + System.currentTimeMillis();
         Shell.Result w = Shell.cmd(
-            "echo t > '" + testFile + "' && rm '" + testFile + "' && echo Y || echo N"
+            "echo t > '" +
+                testFile +
+                "' && rm '" +
+                testFile +
+                "' && echo Y || echo N"
         ).exec();
-        return !w.getOut().isEmpty() && w.getOut().get(w.getOut().size() - 1).equals("Y");
+        return (
+            !w.getOut().isEmpty() &&
+            w
+                .getOut()
+                .get(w.getOut().size() - 1)
+                .equals("Y")
+        );
     }
 
     private static void logPackageInfo(String pkg) {
         Shell.Result permRes = Shell.cmd(
-            "dumpsys package " + pkg
-            + " | grep -E 'storage|STORAGE|READ_MEDIA|MANAGE|EXTERNAL|granted=true'"
-            + " | head -20"
+            "dumpsys package " +
+                pkg +
+                " | grep -E 'storage|STORAGE|READ_MEDIA|MANAGE|EXTERNAL|granted=true'" +
+                " | head -20"
         ).exec();
         if (!permRes.getOut().isEmpty()) {
             FixerLog.d("  Permissions:");
@@ -409,8 +654,9 @@ public class StorageFixer {
         Shell.Result exists = Shell.cmd(
             "[ -d '" + path + "' ] && echo EXISTS || echo MISSING"
         ).exec();
-        String status = exists.getOut().isEmpty() ? "UNKNOWN"
-                : exists.getOut().get(0);
+        String status = exists.getOut().isEmpty()
+            ? "UNKNOWN"
+            : exists.getOut().get(0);
         if ("MISSING".equals(status)) {
             FixerLog.d("  [" + label + "] " + path + " -> MISSING");
             return;
@@ -428,17 +674,27 @@ public class StorageFixer {
     }
 
     public static class FixResult {
+
         public String packageName;
         public boolean dataOk, obbOk, mediaOk, writeTestOk, success;
 
-        FixResult(String pkg) { this.packageName = pkg; }
+        FixResult(String pkg) {
+            this.packageName = pkg;
+        }
 
         @Override
         public String toString() {
-            return (success ? "OK " : "FAIL ") + packageName
-                    + " [data:" + (dataOk ? "ok" : "fail")
-                    + " obb:" + (obbOk ? "ok" : "fail")
-                    + " media:" + (mediaOk ? "ok" : "fail") + "]";
+            return (
+                (success ? "OK " : "FAIL ") +
+                packageName +
+                " [data:" +
+                (dataOk ? "ok" : "fail") +
+                " obb:" +
+                (obbOk ? "ok" : "fail") +
+                " media:" +
+                (mediaOk ? "ok" : "fail") +
+                "]"
+            );
         }
     }
 }

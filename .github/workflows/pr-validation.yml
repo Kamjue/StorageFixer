@@ -1,0 +1,14 @@
+name: Validate PR
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    uses: ./.github/workflows/android.yml
+    with:
+      gradle-task: "lintDebug check"
